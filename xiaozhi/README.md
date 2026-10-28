@@ -1,6 +1,10 @@
 # 小智AI for MaixCAM2 v2
 
-设备：`root@192.168.31.48`（maixcam2-40d4，Ubuntu 22.04 / MaixPy 4.12.5 / Python 3.13）
+本地扩展现有29个MCP工具：包含摄像头、补光灯、板载外设、IMU实时显示/陀螺仪校准与受控I/O。摄像头按需拍摄并预览3秒；补光灯使用B25/PWM6；外部目标默认关闭。接口与证据见 [MCP 清单](../docs/MCP_CAPABILITIES.md)、[开发汇总](../docs/DEVELOPMENT_SUMMARY_2026-10-25.md) 和 [访问配置](../docs/IO_ACCESS.md)。
+
+当前触摸唤醒为左上圆标持续2秒，普通触屏不触发；X结束当前会话。静音只影响播放PCM，麦克风继续工作。以下为上游历史设计记录，与上述变更冲突时以当前代码及当日验收为准。
+
+设备：`root@<device-ip>`（maixcam2-test-device，Ubuntu 22.04 / MaixPy 4.12.5 / Python 3.13）
 
 ## 一、这一版修好了什么
 
@@ -13,11 +17,27 @@
 | 采集线程死掉（`mic_blocks` 冻在 63 万） | `Recorder` 偶发失效无自救 | 加采集看门狗（**不在运行期重建** `Recorder`，见第四节） |
 | TTS 无声 | 服务器固定 24k 输出，codec 只支持 16k/48k | 按 **Opus TOC 字节**解析每包帧长（20/40/60ms 自适应），再 24k→48k 重采样播放 |
 | 打断 / 多轮不可用 | 没有轮次状态机 | `LISTENING / WAITING / SPEAKING` 三态机 + `tts stop` 后自动 `listen start`，支持连续多轮 |
-| **开机黑屏（可复现）** | `xiaozhi.service` 抢在 `launcher.service` 之前初始化了 maix 多媒体栈，launcher 首帧 DRAM atomic commit 永久阻塞在 `drm_atomic_helper_wait_for_vblanks` | unit 加 `After=launcher.service`，并用 `ExecStartPre` 等到 launcher 打开 `/dev/dri/card0` 后再启动（见第四节） |
+| **开机黑屏（可复现）** | `xiaozhi.service` 抢在 `launcher.service` 之前初始化了 maix 多媒体栈，launcher 首帧 DRM atomic commit 永久阻塞在 `drm_atomic_helper_wait_for_vblanks` | unit 加 `After=launcher.service`，并用 `ExecStartPre` 等到 launcher 打开 `/dev/dri/card0` 后再启动 |
 | **TTS 播放一顿一顿** | **根因：`maix.audio.Recorder` 阻塞模式的 pybind 绑定持 GIL 约 20ms**，把整个进程量化成 20ms 一跳 → 事件循环收包成簇 → 播放被抽干。A/B 实测：`block=True` 主线程 10ms 定时超出 **10.0ms**；`block=False` 仅 **0.1ms**，采集量不变 | `Recorder(..., block=False)`；播放线程成块写 100ms；播放期间跳过上行编码；抖动缓冲按「虚拟缓冲」实测需求自适应（350~1000ms） |
-| **叉掉弹窗后自己又弹出来** | 关闭弹窗的那次触摸同时被 overlay 和 `maix.touchscreen` 看到，后者当成「触摸唤醒」又把窗口拉起来 | 唤醒事件带来源标记；弹窗可见时触摸由 overlay 独占，处理后 1.5s 内的触摸一律忽略 |
+| **叉掉弹窗后自己又弹出来** | 关闭弹窗的那次触摸同时被 overlay 和 `maix.touchscreen` 看到，后者当成「触摸唤醒」又把窗口拉起来 | 历史版本先通过来源标记和独占触摸防重触；当前已改为坐标转换、X结束会话及圆标长按2秒，普通触屏不唤醒 |
 | **弹窗盖住了桌面却还能滑动** | overlay 只拦截自己 `open()` 的那几个 evdev fd，launcher 自己开的 fd 号不同 → 完全漏网 | 按设备号识别（`fstat` + `major==13`）而非 fd 号；并加 `EVIOCGRAB` 独占触摸设备，与读取方式无关 |
 
+
+### 2026-10-25 后续补充修复
+
+完整根因和验证见[主README“踩过的坑”](../README.md#四踩过的坑已修复问题与验证边界)，避免将历史防抖方案误认为当前行为。
+
+| 已解决问题 | 当前处理 |
+|---|---|
+| X点不到、被误判为唤醒 | 原始竖屏坐标转横屏；关闭与喇叭热区分开，X结束当前会话 |
+| 全屏误唤醒、指定长按无效 | 左上圆标热区连续2秒；读取实际MT槽位和按压状态，覆盖已记录的边缘触点 |
+| 关闭后的再次语音唤醒 | 解码命中立即reset，本地KWS恢复先于网络关闭；真实声音复测通过 |
+| 静音喇叭后麦克风近乎无声 | 不再修改RX输入增益，仅缩放播放PCM；真实对话复测通过 |
+| 拍照偏色及预览不刷新 | AE/AWB预热；缓存检查纳秒mtime及inode；同一照片预览3秒 |
+| Func影响后台、按键被误拦截 | 移除后台进程默认退出监听，只读按键；拦截限定为真正的触摸设备 |
+| IMU零偏、温度占位值、并行轮询 | 静止校准并保存；温度不可用返回null；操作串行化，轮询随界面/会话清理 |
+
+双模型实时性、优化后的实显和外接I/O仍按[后续清单](../docs/NEXT_STEPS.md)验证，不计入上述已完成结论。
 
 ## 二、目录结构
 

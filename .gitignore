@@ -14,6 +14,9 @@ state.json
 *.wav
 *.pyc
 __pycache__/
+/.runtime/
+/.omx/
+/siot_MaixCam/
 
 # ---- 唤醒模型与预编译运行库：随仓库一起分发（约 50MB，均 < 100MB 单文件上限）----
 #   device_snapshot/root_xiaozhi/models/zh/     sherpa-onnx KWS 模型（zipformer-wenetspeech-3.3M）
@@ -29,3 +32,11 @@ __pycache__/
 # ---- 系统垃圾 ----
 .DS_Store
 *.swp
+
+# Local peripheral target permissions, not the public empty example
+io_access.json
+**/io_access.json
+
+# Device-specific gyro bias
+imu_gyro_calibration.json
+**/imu_gyro_calibration.json

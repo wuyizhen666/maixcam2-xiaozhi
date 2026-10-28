@@ -1,0 +1,9 @@
+id: siot_monitor
+name: SIoT Monitor
+name[zh]: SIoT监控
+version: 0.1.0
+author: Local project
+desc: MQTT topic monitor and touch message editor
+desc[zh]: 主题消息查看与触屏编辑发送
+exec: launch.py
+icon: /opt/siot/httpsvr/static/SIoT.png

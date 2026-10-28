@@ -14,6 +14,8 @@
     偏移 12 : n*w*h*4 字节 RGBA
 """
 import os
+import io
+import math
 import struct
 import time
 
@@ -40,6 +42,7 @@ C_HINT = (120, 150, 178)
 C_ACT = (255, 176, 60)
 
 STRIP_H = 58
+MCP_FOOTER_H = 42
 BUBBLE_TOP = 174
 BUBBLE_GAP = 8
 BUBBLE_MAXW = 520
@@ -53,7 +56,7 @@ MAX_BUBBLES = 4
 LEFT_X = 20
 RIGHT_X = W - 20
 
-# 顶部条交互热区（640x480 坐标系，shim 触摸拦截上报同一坐标系）
+# 顶部条交互热区（640x480；服务将shim原始触摸坐标旋转到此坐标系）
 BTN_CLOSE = (604, 12, 28, 32)
 BTN_SPEAKER = (556, 12, 34, 32)
 
@@ -187,12 +190,14 @@ def _blit_bubble(img, d, x0, y0, x1, y1, fill, radius=BUBBLE_RADIUS):
 
 def render(path, *, state="idle", detail="", bubbles=(), emotion="",
            wake_word="你好小智", muted=False, clock=True, activation_code="",
-           footer=True):
+           footer=True, photo_jpeg=None, mcp_tool="", imu_sample=None,
+           imu_compact=None):
     """渲染一帧到 path（原子替换）。
 
-    state="idle"  -> 全透明（弹窗隐藏，桌面完全不受影响）
+    state="idle" 且没有临时反馈 -> 全透明（弹窗隐藏）。
     """
-    show = state != "idle"
+    show = (state != "idle" or photo_jpeg is not None or bool(mcp_tool)
+            or imu_sample is not None or imu_compact is not None)
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     if show:
         d = ImageDraw.Draw(img)
@@ -229,7 +234,28 @@ def render(path, *, state="idle", detail="", bubbles=(), emotion="",
             fc = font(30)
             cw = text_w(d, code, fc)
             bold_text(d, ((W - cw) / 2, 118), code, fc, C_ACT)
-            _footer(d, "等待激活…", footer)
+            if mcp_tool or imu_compact is not None:
+                _mcp_footer(d, mcp_tool or "self.imu.read", imu_compact)
+            else:
+                _footer(d, "等待激活…", footer)
+            return _save(img, path)
+
+        # The captured JPEG replaces bubbles temporarily, preserving all of it.
+        if photo_jpeg is not None:
+            top, bottom = STRIP_H + 1, H - MCP_FOOTER_H
+            d.rectangle([0, top, W, H], fill=(0, 0, 0, 255))
+            with Image.open(io.BytesIO(photo_jpeg)) as source:
+                photo = source.convert("RGB")
+            photo.thumbnail((W, bottom - top))
+            img.paste(photo, ((W - photo.width) // 2,
+                              top + (bottom - top - photo.height) // 2))
+            if mcp_tool or imu_compact is not None:
+                _mcp_footer(d, mcp_tool or "self.imu.read", imu_compact)
+            return _save(img, path)
+
+        if imu_sample is not None:
+            _imu_panel(d, imu_sample)
+            _mcp_footer(d, mcp_tool or "self.imu.read")
             return _save(img, path)
 
         # ---------------- 聊天气泡 ----------------
@@ -248,7 +274,8 @@ def render(path, *, state="idle", detail="", bubbles=(), emotion="",
                 total = laid[0][2]
 
         y = BUBBLE_TOP
-        limit = H - (34 if footer else 8)
+        limit = H - (MCP_FOOTER_H + 8 if mcp_tool or imu_compact is not None
+                     else (34 if footer else 8))
         for role, lines, bh in laid:
             if y + bh > limit:
                 break
@@ -273,10 +300,91 @@ def render(path, *, state="idle", detail="", bubbles=(), emotion="",
                 ty += LINE_H
             y += bh + BUBBLE_GAP
 
-        if footer:
-            _footer(d, "说「%s」唤醒 · 点屏幕说话 · 点 X 关闭" % wake_word, True)
+        if mcp_tool or imu_compact is not None:
+            _mcp_footer(d, mcp_tool or "self.imu.read", imu_compact)
+        elif footer:
+            _footer(d, "说「%s」或长按左上角2秒唤醒 · 点 X 关闭" % wake_word, True)
 
     return _save(img, path)
+
+
+def _imu_number(value, spec="+.2f"):
+    """Missing/nonfinite sensor readings must never look like measured zero."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "--"
+    return format(value, spec) if math.isfinite(value) else "--"
+
+
+def _imu_panel(d, sample):
+    """Draw a snapshot only; acquisition and its display lifetime belong to UI state."""
+    d.rounded_rectangle([16, 70, W - 16, 426], radius=14,
+                        fill=C_STRIP_BG + (255,), outline=C_STRIP_LINE + (255,))
+    d.text((32, 80), "IMU 六轴数据", font=font(24), fill=C_STATE)
+    model = wrap(str(sample.get("model") or "型号未知"), font(18), 250, d)[0]
+    d.text((350, 86), model, font=font(18), fill=C_CLOCK)
+    for left, label, key in ((32, "加速度  m/s²", "acceleration_m_s2"),
+                             (336, "角速度  °/s", "angular_velocity_deg_s")):
+        d.text((left, 130), label, font=font(20), fill=C_BUBBLE_AI)
+        axes = sample.get(key) or {}
+        for row, axis in enumerate(("x", "y", "z")):
+            y = 168 + row * 57
+            d.text((left, y + 9), axis.upper(), font=font(20), fill=C_HINT)
+            value = _imu_number(axes.get(axis))
+            f = font(34)
+            if text_w(d, value, f) > 215:
+                value = _imu_number(axes.get(axis), "+.2e")
+                f = font(28)
+            d.text((left + 34, y), value, font=f, fill=C_CLOCK)
+    d.line([(32, 344), (608, 344)], fill=C_STRIP_LINE, width=1)
+    temperature = _imu_number(sample.get("temperature_c"), ".1f")
+    temp_text = "温度未提供" if temperature == "--" else "温度 %s °C" % temperature
+    calibrated = sample.get("gyro_calibrated")
+    calibration = ("陀螺仪已校准" if calibrated is True else
+                   "陀螺仪未校准" if calibrated is False else "陀螺仪校准状态未知")
+    d.text((32, 355), temp_text, font=font(18), fill=C_HINT)
+    d.text((336, 355), calibration, font=font(18), fill=C_CLOCK if calibrated is True else C_ACT)
+    timestamp = sample.get("timestamp_unix")
+    stamp = "--"
+    if _imu_number(timestamp) != "--":
+        try:
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+        except (ValueError, OverflowError, OSError):
+            pass
+    d.text((32, 389), "采样时间  " + stamp, font=font(16), fill=C_HINT)
+
+
+def _mcp_footer(d, name, imu_compact=None):
+    d.rectangle([0, H - MCP_FOOTER_H, W, H], fill=C_STRIP_BG + (255,))
+    d.line([(0, H - MCP_FOOTER_H), (W, H - MCP_FOOTER_H)],
+           fill=C_STRIP_LINE + (255,), width=1)
+    text = "MCP: " + name
+    for size in range(14 if imu_compact is not None else 16, 9, -1):
+        f = font(size)
+        if text_w(d, text, f) <= W - 24:
+            break
+    if imu_compact is None:
+        d.text((12, H - 32), text, font=f, fill=C_STATE)
+        return
+    while text_w(d, text, f) > W - 24:
+        text = text[:-2] + "…"
+    d.text((12, H - 41), text, font=f, fill=C_STATE)
+    groups = []
+    for label, key, unit in (("A", "acceleration_m_s2", "m/s²"),
+                              ("G", "angular_velocity_deg_s", "°/s")):
+        axes = imu_compact.get(key) or {}
+        values = []
+        for axis in ("x", "y", "z"):
+            value = _imu_number(axes.get(axis))
+            if len(value) > 8:
+                value = _imu_number(axes.get(axis), "+.2e")
+            values.append(value)
+        groups.append("%s %s %s" % (label, "/".join(values), unit))
+    text = "  ".join(groups)
+    for size in range(15, 9, -1):
+        f = font(size)
+        if text_w(d, text, f) <= W - 24:
+            break
+    d.text((12, H - 22), text, font=f, fill=C_CLOCK)
 
 
 def _footer(d, text, enabled):

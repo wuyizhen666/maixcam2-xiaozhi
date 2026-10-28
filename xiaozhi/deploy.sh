@@ -15,10 +15,31 @@ SRC=$(cd "$(dirname "$0")" && pwd)
 KEEP=0
 [ "$1" = "--keep" ] && KEEP=1
 
+# Deployment is supported from the desktop, not while a camera App owns DRM.
+if ! pgrep -x launcher >/dev/null 2>&1; then
+    echo "请先退出前台 App，回到 MaixCAM2 应用桌面后再部署。" >&2
+    exit 1
+fi
+if [ -f /etc/systemd/system/xiaozhi.service ]; then
+    systemctl stop xiaozhi.service
+fi
+
 echo "=== 1. 后台服务 ==="
 mkdir -p /root/xiaozhi /maixapp/apps/xiaozhi/assets /root/uishim
 cp -f "$SRC/service/xiaozhi_service.py" /root/xiaozhi/
 cp -f "$SRC/service/ui_render.py"      /root/xiaozhi/
+cp -f "$SRC/service/hardware_tools.py" /root/xiaozhi/
+cp -f "$SRC/service/camera_ownership.py" /root/xiaozhi/
+cp -f "$SRC/service/vision_siot.py" /root/xiaozhi/
+cp -f "$SRC/service/ui_feedback.py"    /root/xiaozhi/
+cp -f "$SRC/service/ui_ownership.py"   /root/xiaozhi/
+cp -f "$SRC/service/peripheral_tools.py" /root/xiaozhi/
+cp -f "$SRC/service/imu_adapter.py"      /root/xiaozhi/
+cp -f "$SRC/service/io_tools.py"         /root/xiaozhi/
+cp -f "$SRC/service/service_cleanup.py"  /root/xiaozhi/
+if [ ! -e /root/xiaozhi/io_access.json ]; then
+    install -m 600 "$SRC/service/io_access.example.json" /root/xiaozhi/io_access.json
+fi
 cp -f "$SRC/service/xiaozhi.service"   /root/xiaozhi/_pkg/xiaozhi.service 2>/dev/null || {
     mkdir -p /root/xiaozhi/_pkg; cp -f "$SRC/service/xiaozhi.service" /root/xiaozhi/_pkg/; }
 
@@ -40,7 +61,10 @@ fi
 echo "=== 3. 编译注入库 ==="
 cd /root/uishim
 cp -f "$SRC/uishim/maixcam2_overlay.c" .
-gcc -O2 -fPIC -shared -o libmaixcam2_overlay.so maixcam2_overlay.c -ldl -lpthread
+gcc -O2 -fPIC -shared -o libmaixcam2_overlay.so.new maixcam2_overlay.c -ldl -lpthread
+# Do not truncate a library still mapped by the running desktop.
+systemctl stop launcher.service
+mv -f libmaixcam2_overlay.so.new libmaixcam2_overlay.so
 ls -la libmaixcam2_overlay.so
 
 echo "=== 4. systemd：服务 + launcher 注入 ==="
@@ -57,8 +81,9 @@ systemctl daemon-reload
 systemctl enable xiaozhi.service >/dev/null 2>&1 || true
 
 echo "=== 5. 启动 ==="
-systemctl restart xiaozhi.service
-systemctl restart launcher.service || true
+systemctl start launcher.service
+# xiaozhi.service additionally waits for the desktop's DRM fd before audio init.
+systemctl start xiaozhi.service
 
 echo
 echo "=== 完成 ==="

@@ -35,6 +35,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -59,6 +60,8 @@ typedef struct {
     int n, w, h;
     int has_visible;
     time_t mtime;
+    long mtime_nsec;
+    ino_t inode;
     long size;
 } overlay_t;
 
@@ -180,7 +183,8 @@ static void free_overlay(overlay_t *o) {
 static int load_overlay(overlay_t *o) {
     struct stat st;
     if (stat(o->path, &st) != 0) return -1;
-    if (o->pix && st.st_mtime == o->mtime && (long)st.st_size == o->size)
+    if (o->pix && st.st_mtime == o->mtime && st.st_mtim.tv_nsec == o->mtime_nsec &&
+        st.st_ino == o->inode && (long)st.st_size == o->size)
         return 0;
     if ((unsigned long)st.st_size > MAX_ICON_BYTES) return -1;
 
@@ -215,6 +219,8 @@ static int load_overlay(overlay_t *o) {
     o->h = (int)h;
     o->has_visible = visible;
     o->mtime = st.st_mtime;
+    o->mtime_nsec = st.st_mtim.tv_nsec;
+    o->inode = st.st_ino;
     o->size = (long)st.st_size;
     pthread_mutex_unlock(&ovl_lock);
     return 1;
@@ -312,27 +318,41 @@ static void set_touch_grab(int on) {
     gflog("[ovl] 触摸设备 %s\n", on ? "已独占（桌面不可点/不可滑）" : "已释放");
 }
 
+static int input_has_bit(const unsigned long *bits, unsigned int bit) {
+    unsigned int word_bits = sizeof(*bits) * 8;
+    return !!(bits[bit / word_bits] & (1UL << (bit % word_bits)));
+}
+
+/* 按设备能力识别触摸，兼容 launcher 自己打开的 fd；GPIO 按键和键盘
+ * 也属于 INPUT_MAJOR，不能仅凭 major 独占或吞掉它们的事件。探测失败放行。 */
+static int is_evdev_fd(int fd) {
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0) return 0;
+    if (!S_ISCHR(st.st_mode) || major(st.st_rdev) != 13) return 0;
+    unsigned long events[EV_MAX / (sizeof(unsigned long) * 8) + 1] = {0};
+    unsigned long axes[ABS_MAX / (sizeof(unsigned long) * 8) + 1] = {0};
+    if (ioctl(fd, EVIOCGBIT(0, sizeof(events)), events) < 0 ||
+        !input_has_bit(events, EV_ABS)) return 0;
+    if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(axes)), axes) < 0) return 0;
+    return (input_has_bit(axes, ABS_X) && input_has_bit(axes, ABS_Y)) ||
+           (input_has_bit(axes, ABS_MT_POSITION_X) &&
+            input_has_bit(axes, ABS_MT_POSITION_Y));
+}
+
 static void install_touch_hook(void) {
     glob_t g;
     memset(&g, 0, sizeof(g));
     if (glob(EVDEV_GLOB, 0, NULL, &g) == 0) {
         for (size_t i = 0; i < g.gl_pathc && evdev_cnt < MAX_EVDEV; i++) {
             int fd = open(g.gl_pathv[i], O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-            if (fd >= 0) evdev_fds[evdev_cnt++] = fd;
+            if (fd >= 0) {
+                if (is_evdev_fd(fd)) evdev_fds[evdev_cnt++] = fd;
+                else close(fd);
+            }
         }
     }
     globfree(&g);
-    tlog("hooked %d evdev fds (pid %d)\n", evdev_cnt, (int)getpid());
-}
-
-/* 只认设备本身，不认 fd 号：launcher 自己 open 的 /dev/input/eventX
- * 和本库 constructor 里 open 的不是同一个 fd，旧实现因此完全拦不住
- * launcher 的触摸读取（弹窗盖住了桌面，桌面却还能滑动）。 */
-static int is_evdev_fd(int fd) {
-    struct stat st;
-    if (fd < 0) return 0;
-    if (fstat(fd, &st) != 0) return 0;
-    return S_ISCHR(st.st_mode) && major(st.st_rdev) == 13; /* INPUT_MAJOR */
+    tlog("hooked %d touch evdev fds (pid %d)\n", evdev_cnt, (int)getpid());
 }
 
 /* 弹窗图层是否可见 —— 不依赖 VO_push 是否还在被调用（桌面静止时可能不再推帧，

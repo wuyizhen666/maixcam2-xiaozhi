@@ -1,0 +1,9 @@
+id: xiaozhi_vision_test
+name: Vision Model Test
+name[zh]: 视觉模型测试
+version: 0.1.0
+author: XiaoZhi diagnostics
+desc: Visible local pose and object model test, with measured software timing
+desc[zh]: 离线姿态与物品模型实显测试，显示真实识别框及软件计时
+icon: /maixapp/apps/detector/assets/detector.png
+exec: main.py

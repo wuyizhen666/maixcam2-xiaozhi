@@ -16,6 +16,7 @@ WorkingDirectory=/root/xiaozhi
 # 双保险：等 launcher 真正打开了 /dev/dri/card0（= 显示已初始化）再等 2s
 ExecStartPre=/bin/sh -c 'i=0; while [ $i -lt 60 ]; do p=$(pgrep -x launcher | head -1); if [ -n "$p" ] && ls -l /proc/$p/fd 2>/dev/null | grep -q "dri/card0"; then break; fi; i=$((i+1)); sleep 0.5; done; sleep 2'
 ExecStart=/usr/bin/python3 -u /root/xiaozhi/xiaozhi_service.py
+ExecStopPost=/usr/bin/python3 /root/xiaozhi/service_cleanup.py
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
